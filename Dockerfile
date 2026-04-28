@@ -26,15 +26,40 @@ ARG OPENCLAW_NODE_BOOKWORM_SLIM_DIGEST="sha256:e8e2e91b1378f83c5b2dd15f0247f3411
 FROM ${OPENCLAW_NODE_BOOKWORM_IMAGE} AS ext-deps
 ARG OPENCLAW_EXTENSIONS
 ARG OPENCLAW_BUNDLED_PLUGIN_DIR
-# Copy package.json for opted-in extensions so pnpm resolves their deps.
+# Copy package.json for staged-runtime and opted-in extensions so pnpm resolves
+# their deps in the install layer.
 RUN --mount=type=bind,source=${OPENCLAW_BUNDLED_PLUGIN_DIR},target=/tmp/${OPENCLAW_BUNDLED_PLUGIN_DIR},readonly \
-    mkdir -p /out && \
-    for ext in $OPENCLAW_EXTENSIONS; do \
-      if [ -f "/tmp/${OPENCLAW_BUNDLED_PLUGIN_DIR}/$ext/package.json" ]; then \
-        mkdir -p "/out/$ext" && \
-        cp "/tmp/${OPENCLAW_BUNDLED_PLUGIN_DIR}/$ext/package.json" "/out/$ext/package.json"; \
-      fi; \
-    done
+    set -eu; \
+    node --input-type=module -e ' \
+      import fs from "node:fs"; \
+      import path from "node:path"; \
+      const root = process.argv[1]; \
+      const out = process.argv[2]; \
+      const selected = new Set(); \
+      function copyPackageJson(ext) { \
+        const packageJsonPath = path.join(root, ext, "package.json"); \
+        if (!fs.existsSync(packageJsonPath)) return; \
+        const outDir = path.join(out, ext); \
+        fs.mkdirSync(outDir, { recursive: true }); \
+        fs.copyFileSync(packageJsonPath, path.join(outDir, "package.json")); \
+        selected.add(ext); \
+      } \
+      fs.mkdirSync(out, { recursive: true }); \
+      for (const dirent of fs.readdirSync(root, { withFileTypes: true })) { \
+        if (!dirent.isDirectory()) continue; \
+        const packageJsonPath = path.join(root, dirent.name, "package.json"); \
+        if (!fs.existsSync(packageJsonPath)) continue; \
+        const pkg = JSON.parse(fs.readFileSync(packageJsonPath, "utf8")); \
+        if (pkg.openclaw?.bundle?.stageRuntimeDependencies === true) { \
+          copyPackageJson(dirent.name); \
+        } \
+      } \
+      for (const ext of process.argv.slice(3)) copyPackageJson(ext); \
+      fs.writeFileSync( \
+        path.join(out, ".openclaw-runtime-extension-workspaces"), \
+        [...selected].toSorted((left, right) => left.localeCompare(right)).join("\n") + "\n", \
+      ); \
+    ' "/tmp/${OPENCLAW_BUNDLED_PLUGIN_DIR}" /out $OPENCLAW_EXTENSIONS
 
 # ── Stage 2: Build ──────────────────────────────────────────────
 FROM ${OPENCLAW_NODE_BOOKWORM_IMAGE} AS build
@@ -119,12 +144,12 @@ FROM build AS runtime-assets
 ARG OPENCLAW_EXTENSIONS
 ARG OPENCLAW_BUNDLED_PLUGIN_DIR
 # Keep the install layer frozen, but allow prune to run against the full copied
-# workspace tree subset used during `pnpm install`. The build stage only copied
-# the root, `ui`, and opted-in plugin manifests into the install layer, so
-# prune must not rediscover unrelated workspaces from the later full source
-# copy.
+# workspace tree subset used during `pnpm install`, so prune must not rediscover unrelated workspaces
+# from the later full source copy.
 RUN printf 'packages:\n  - .\n  - ui\n' > /tmp/pnpm-workspace.runtime.yaml && \
-    for ext in $OPENCLAW_EXTENSIONS; do \
+    OPENCLAW_RUNTIME_EXTENSION_WORKSPACES=/tmp/openclaw-runtime-extension-workspaces && \
+    cp "/app/${OPENCLAW_BUNDLED_PLUGIN_DIR}/.openclaw-runtime-extension-workspaces" "$OPENCLAW_RUNTIME_EXTENSION_WORKSPACES" && \
+    for ext in $(cat /tmp/openclaw-runtime-extension-workspaces); do \
       printf '  - %s/%s\n' "$OPENCLAW_BUNDLED_PLUGIN_DIR" "$ext" >> /tmp/pnpm-workspace.runtime.yaml; \
     done && \
     cp /tmp/pnpm-workspace.runtime.yaml pnpm-workspace.yaml && \

@@ -77,6 +77,15 @@ describe("Dockerfile", () => {
     );
   });
 
+  it("installs staged bundled extension runtime dependencies by default", async () => {
+    const dockerfile = await readFile(dockerfilePath, "utf8");
+    expect(dockerfile).toContain("stageRuntimeDependencies");
+    expect(dockerfile).toContain("pkg.openclaw?.bundle?.stageRuntimeDependencies === true");
+    expect(dockerfile).toContain("process.argv.slice(3)");
+    expect(dockerfile).toContain("OPENCLAW_RUNTIME_EXTENSION_WORKSPACES");
+    expect(dockerfile).toContain("for ext in $(cat /tmp/openclaw-runtime-extension-workspaces)");
+  });
+
   it("keeps package manager patch files in runtime images", async () => {
     const dockerfile = await readFile(dockerfilePath, "utf8");
     const packageJson = JSON.parse(await readFile(packageJsonPath, "utf8")) as {
